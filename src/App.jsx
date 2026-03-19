@@ -77,26 +77,40 @@ const globalCss = `
 `;
 
 // ── API helpers — all routed through local proxy ───────────────────────────
-async function callClaude(prompt, maxTokens = 600) {
+// Haiku for cheap utility calls
+async function callHaiku(prompt, maxTokens = 400) {
   const res = await fetch('/api/claude', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, maxTokens }),
+    body: JSON.stringify({ prompt, maxTokens, model: 'haiku' }),
   });
   const d = await res.json();
   if (d.error) throw new Error(d.error);
   return d.text || '';
 }
 
-async function fetchStatsWithSearch(player, season) {
-  const res = await fetch('/api/stats', {
+// Sonnet for deep analysis only
+async function callClaude(prompt, maxTokens = 600) {
+  const res = await fetch('/api/claude', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ player, season }),
+    body: JSON.stringify({ prompt, maxTokens, model: 'sonnet' }),
   });
   const d = await res.json();
   if (d.error) throw new Error(d.error);
-  return d;
+  return d.text || '';
+}
+
+// Fetch stats for multiple players in ONE API call
+async function fetchStatsBatch(players) {
+  const res = await fetch('/api/stats/batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ players }),
+  });
+  const d = await res.json();
+  if (d.error) throw new Error(d.error);
+  return d; // { "Player::season": statsObj, ... }
 }
 
 function parseJSON(text) {
@@ -121,23 +135,26 @@ function Spinner({ size = 12, color }) {
 // ── SourceBadge ────────────────────────────────────────────────────────────
 function SourceBadge({ stats }) {
   if (!stats) return null;
-  const isBBRef = stats.source && stats.source.toLowerCase().includes('basketball reference');
+  const src = stats.source || '';
+  const isBDL    = src.includes('balldontlie');
+  const isBBRef  = src.includes('Basketball Reference') && src.includes('web search');
+  const isAI     = src.includes('AI');
+  const label    = isBDL ? '✓ Live (BDL)' : isBBRef ? '✓ BBRef live' : '~ AI / BBRef';
+  const bg       = isBDL ? '#0a2a1a' : isBBRef ? C.bbref : C.estimate;
+  const color    = isBDL ? '#4ade80' : isBBRef ? C.bbrefText : C.estimateText;
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
       <span style={{
         fontSize: 8, padding: '1px 6px', borderRadius: 3,
-        background: isBBRef ? C.bbref : C.estimate,
-        color: isBBRef ? C.bbrefText : C.estimateText,
+        background: bg, color,
         fontFamily: "'Barlow',sans-serif", fontWeight: 700, letterSpacing: '0.3px',
-      }}>
-        {isBBRef ? '✓ BBRef' : '~ AI Estimate'}
-      </span>
+      }}>{label}</span>
       {stats.confidence && (
         <span style={{
           fontSize: 8, fontFamily: "'Barlow',sans-serif",
           color: stats.confidence === 'high' ? C.success : stats.confidence === 'medium' ? C.warn : C.muted,
         }}>
-          {stats.confidence} confidence
+          {stats.confidence} conf.
         </span>
       )}
     </div>
@@ -160,7 +177,7 @@ function DisclaimerBanner() {
           AI-POWERED SIMULATION
         </div>
         <div style={{ fontSize: 10, color: C.muted, fontFamily: "'Barlow',sans-serif", lineHeight: 1.5 }}>
-          Stats are sourced via AI web search referencing Basketball Reference where possible.
+          Current season stats sourced live from balldontlie.io. Recent seasons use Basketball Reference web search. Historical seasons use AI knowledge.
           Numbers marked <span style={{ color: C.bbrefText }}>✓ BBRef</span> have higher confidence;{' '}
           <span style={{ color: C.estimateText }}>~ AI Estimate</span> means less certainty.
           All projections are for entertainment — this is a what-if simulator, not an official stats product.
@@ -184,7 +201,7 @@ function TeamSearch({ onLoadTeam, loadingTeam, currentPreset }) {
     if (val.trim().length < 2) { setSuggestions([]); return; }
     setSugLoading(true);
     try {
-      const txt = await callClaude(
+      const txt = await callHaiku(
         `The user typed "${val}" into an NBA team search box. Return ONLY a JSON array of up to 6 matching NBA team-season strings. Format: "YYYY Team Name" e.g. ["1996 Chicago Bulls"]. Show most famous matching seasons. No markdown.`,
         200
       );
@@ -324,7 +341,7 @@ function PlayerSearch({ onSelect }) {
     if (val.trim().length < 2) { setResults([]); return; }
     setLoading(true);
     try {
-      const txt = await callClaude(
+      const txt = await callHaiku(
         `List up to 8 real NBA players whose names match or contain "${val}". Return ONLY a JSON array of canonical full names. No markdown. If none, return [].`,
         180
       );
@@ -366,7 +383,7 @@ function PlayerSearch({ onSelect }) {
 }
 
 // ── SlotCard ───────────────────────────────────────────────────────────────
-function SlotCard({ pos, di, slot, isSwapped, originalSlot, onAssign, onRemove, onSeason, onRevert, statsCache, loadingKeys }) {
+function SlotCard({ pos, di, slot, isSwapped, originalSlot, onAssign, onRemove, onSeason, onRevert, statsCache, loadingKeys, minutesOverride, onSetMinutes, adjustedStats }) {
   const [busy, setBusy] = useState(false);
   const pc = POS_COLORS[pos];
   const isStarter = di === 0;
@@ -374,7 +391,7 @@ function SlotCard({ pos, di, slot, isSwapped, originalSlot, onAssign, onRemove, 
   const handleSelect = async (name) => {
     setBusy(true);
     try {
-      const txt = await callClaude(
+      const txt = await callHaiku(
         `Return ONLY a JSON object for NBA player "${name}". Keys: "found" (bool), "canonical" (string), "positions" (array from PG/SG/SF/PF/C), "seasons" (array of ints — every NBA season start-year on roster). No markdown.`,
         300
       );
@@ -412,7 +429,7 @@ function SlotCard({ pos, di, slot, isSwapped, originalSlot, onAssign, onRemove, 
         <span style={{ fontSize: 9, color: C.muted, fontFamily: "'Barlow',sans-serif" }}>{DEPTH_LABELS[di]}</span>
         {stats && (
           <span style={{ fontSize: 7, padding: '1px 5px', borderRadius: 3, marginLeft: 2, background: isBBRef ? C.bbref : C.estimate, color: isBBRef ? C.bbrefText : C.estimateText, fontFamily: "'Barlow',sans-serif", fontWeight: 700 }}>
-            {isBBRef ? '✓ BBRef' : '~Est'}
+            {_src.includes('balldontlie') ? '✓ Live' : isBBRef ? '✓ BBRef' : '~Est'}
           </span>
         )}
         {slot && (
@@ -441,11 +458,27 @@ function SlotCard({ pos, di, slot, isSwapped, originalSlot, onAssign, onRemove, 
             <div style={{ fontSize: 9, color: C.muted, fontFamily: "'Barlow',sans-serif", marginBottom: 2, opacity: 0.6 }}>↩ {originalSlot.player.canonical}</div>
           )}
           {statsLoading ? (
-            <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, animation: 'pulse 1.2s infinite' }}>searching BBRef…</div>
-          ) : stats && (
-            <div style={{ fontSize: 9, color: isSwapped ? `${C.swap}cc` : pc.text, fontFamily: "'Barlow',sans-serif", marginBottom: 4 }}>
-              {stats.ppg?.toFixed(1)} / {stats.rpg?.toFixed(1)} / {stats.apg?.toFixed(1)}
-            </div>
+            <div style={{ fontSize: 9, color: C.muted, marginBottom: 4, animation: 'pulse 1.2s infinite' }}>loading stats…</div>
+          ) : adjustedStats && (
+            <>
+              <div style={{ fontSize: 9, color: isSwapped ? `${C.swap}cc` : pc.text, fontFamily: "'Barlow',sans-serif", marginBottom: 3 }}>
+                {adjustedStats.ppg?.toFixed(1)} pts · {adjustedStats.rpg?.toFixed(1)} reb · {adjustedStats.apg?.toFixed(1)} ast
+                {adjustedStats._adjusted && <span style={{ color: C.warn, marginLeft: 4 }}>({minutesOverride} mpg)</span>}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+                <span style={{ fontSize: 8, color: C.dim, fontFamily: "'Barlow',sans-serif", whiteSpace: 'nowrap' }}>
+                  MPG
+                </span>
+                <input type="range" min={10} max={48} step={1}
+                  value={minutesOverride || Math.round(adjustedStats.mpg || 28)}
+                  onChange={e => onSetMinutes(pos, di, Number(e.target.value))}
+                  style={{ flex: 1, height: 3, accentColor: isSwapped ? C.swap : pc.accent, cursor: 'pointer' }}
+                />
+                <span style={{ fontSize: 8, color: minutesOverride ? C.warn : C.muted, fontFamily: "'Barlow',sans-serif", minWidth: 14, textAlign: 'right' }}>
+                  {minutesOverride || Math.round(adjustedStats.mpg || 28)}
+                </span>
+              </div>
+            </>
           )}
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
             {slot.player.seasons.map(yr => (
@@ -474,6 +507,54 @@ function StatBadge({ label, value, pct }) {
   );
 }
 
+// ── CompatibilityCard ──────────────────────────────────────────────────────
+function ScoreBar({ label, score, note, color }) {
+  const pct = Math.round((score / 10) * 100);
+  const barColor = score >= 8 ? C.success : score >= 6 ? C.warn : score >= 4 ? '#f0a029' : C.danger;
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3 }}>
+        <span style={{ fontSize: 10, fontWeight: 700, color: C.text, fontFamily: "'Barlow Condensed',sans-serif", letterSpacing: '0.5px' }}>{label}</span>
+        <span style={{ fontSize: 11, fontWeight: 800, color: barColor, fontFamily: "'Barlow Condensed',sans-serif" }}>{score}/10</span>
+      </div>
+      <div style={{ height: 5, background: C.surface, borderRadius: 3, overflow: 'hidden', marginBottom: 4 }}>
+        <div style={{ height: '100%', width: `${pct}%`, background: barColor, borderRadius: 3, transition: 'width 0.6s ease' }} />
+      </div>
+      <div style={{ fontSize: 10, color: C.muted, fontFamily: "'Barlow',sans-serif", lineHeight: 1.4 }}>{note}</div>
+    </div>
+  );
+}
+
+function CompatibilityCard({ compat }) {
+  if (!compat) return null;
+  const overall = compat.overall || 0;
+  const overallColor = overall >= 80 ? C.success : overall >= 65 ? C.warn : overall >= 50 ? '#f0a029' : C.danger;
+  const grade = overall >= 90 ? 'A+' : overall >= 80 ? 'A' : overall >= 70 ? 'B+' : overall >= 60 ? 'B' : overall >= 50 ? 'C' : 'D';
+  return (
+    <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: '16px 18px', marginBottom: 16, animation: 'fadeIn 0.4s ease' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14, paddingBottom: 12, borderBottom: `1px solid ${C.border}` }}>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 36, fontWeight: 900, fontFamily: "'Barlow Condensed',sans-serif", color: overallColor, lineHeight: 1 }}>{overall}</div>
+          <div style={{ fontSize: 9, color: C.muted, fontFamily: "'Barlow',sans-serif", textTransform: 'uppercase', letterSpacing: '1px' }}>Chemistry</div>
+        </div>
+        <div style={{ width: 1, height: 40, background: C.border }} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: overallColor, fontFamily: "'Barlow Condensed',sans-serif", marginBottom: 2 }}>
+            GRADE: {grade}
+          </div>
+          <div style={{ fontSize: 11, color: C.text, fontFamily: "'Barlow',sans-serif", lineHeight: 1.5 }}>{compat.headline}</div>
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px' }}>
+        <ScoreBar label="OFFENSIVE FIT" score={compat.offensive_fit?.score || 0} note={compat.offensive_fit?.note} />
+        <ScoreBar label="DEFENSIVE FIT" score={compat.defensive_fit?.score || 0} note={compat.defensive_fit?.note} />
+        <ScoreBar label="SPACING" score={compat.spacing?.score || 0} note={compat.spacing?.note} />
+        <ScoreBar label="ERA / PACE FIT" score={compat.era_fit?.score || 0} note={compat.era_fit?.note} />
+      </div>
+    </div>
+  );
+}
+
 // ── App ────────────────────────────────────────────────────────────────────
 export default function App() {
   const emptySlots = () => {
@@ -488,25 +569,81 @@ export default function App() {
   const [loadingTeam, setLoadingTeam] = useState(null);
   const [teamError, setTeamError] = useState(null);
   const [statsCache, setStatsCache] = useState({});
+  const statsCacheRef = useRef({});  // mirror for callbacks — avoids stale closure
   const [loadingKeys, setLoadingKeys] = useState(new Set());
   const [opponent, setOpponent] = useState('');
   const [tab, setTab] = useState('depth');
   const [analysis, setAnalysis] = useState(null);
+  const [compatibility, setCompatibility] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [analysisErr, setAnalysisErr] = useState(null);
   const [showPresets, setShowPresets] = useState(true);
   const [sideTab, setSideTab] = useState('search');
+  // minutesOverride[pos-di] = number (custom MPG) or undefined (use actual)
+  const [minutesOverride, setMinutesOverride] = useState({});
 
-  const loadStats = useCallback(async (canonical, season) => {
-    const key = `${canonical}-${season}`;
-    if (statsCache[key]) return;
-    setLoadingKeys(prev => new Set([...prev, key]));
+  const setMinutes = useCallback((pos, di, mpg) => {
+    setMinutesOverride(prev => ({ ...prev, [`${pos}-${di}`]: mpg }));
+  }, []);
+
+  // Scale counting stats by minutes ratio
+  const getAdjustedStats = useCallback((stats, pos, di) => {
+    if (!stats) return null;
+    const override = minutesOverride[`${pos}-${di}`];
+    if (!override || !stats.mpg || stats.mpg <= 0) return stats;
+    const ratio = override / stats.mpg;
+    return {
+      ...stats,
+      ppg:  stats.ppg  != null ? +(stats.ppg  * ratio).toFixed(1) : null,
+      rpg:  stats.rpg  != null ? +(stats.rpg  * ratio).toFixed(1) : null,
+      apg:  stats.apg  != null ? +(stats.apg  * ratio).toFixed(1) : null,
+      spg:  stats.spg  != null ? +(stats.spg  * ratio).toFixed(1) : null,
+      bpg:  stats.bpg  != null ? +(stats.bpg  * ratio).toFixed(1) : null,
+      mpg:  override,
+      _adjusted: true,
+    };
+  }, [minutesOverride]);
+
+  // Load stats for one player (queues into a batch that fires after 300ms idle)
+  const batchQueue = useRef([]);
+  const batchTimer = useRef(null);
+
+  const flushBatch = useCallback(async () => {
+    const batch = [...batchQueue.current];
+    batchQueue.current = [];
+    if (!batch.length) return;
+
+    // Filter out already-cached (use ref to avoid stale closure)
+    const toFetch = batch.filter(({ key }) => !statsCacheRef.current[key]);
+    if (!toFetch.length) return;
+
+    toFetch.forEach(({ key }) => setLoadingKeys(prev => new Set([...prev, key])));
     try {
-      const stats = await fetchStatsWithSearch(canonical, season);
-      setStatsCache(prev => ({ ...prev, [key]: stats }));
-    } catch (e) { console.warn('Stats load failed:', e.message); }
-    setLoadingKeys(prev => { const n = new Set(prev); n.delete(key); return n; });
-  }, [statsCache]);
+      const results = await fetchStatsBatch(toFetch.map(({ canonical, season }) => ({ player: canonical, season })));
+      const updates = {};
+      for (const { canonical, season, key } of toFetch) {
+        const batchKey = `${canonical}::${season}`;
+        const stats = results[batchKey];
+        if (stats) updates[key] = stats;
+        setLoadingKeys(prev => { const n = new Set(prev); n.delete(key); return n; });
+      }
+      if (Object.keys(updates).length) {
+        statsCacheRef.current = { ...statsCacheRef.current, ...updates };
+        setStatsCache(prev => ({ ...prev, ...updates }));
+      }
+    } catch (e) {
+      console.warn('Batch stats failed:', e.message);
+      toFetch.forEach(({ key }) => setLoadingKeys(prev => { const n = new Set(prev); n.delete(key); return n; }));
+    }
+  }, []);
+
+  const loadStats = useCallback((canonical, season) => {
+    const key = `${canonical}-${season}`;
+    if (statsCacheRef.current[key]) return;
+    batchQueue.current.push({ canonical, season, key });
+    clearTimeout(batchTimer.current);
+    batchTimer.current = setTimeout(() => flushBatch(), 300);
+  }, [flushBatch]);
 
   const handleLoadTeam = useCallback(async (query) => {
     setLoadingTeam(query);
@@ -544,7 +681,7 @@ If can't be identified: {"found":false,"label":"${query}"}`,
             const sorted = (p.seasons || [yr]).sort((a, b) => a - b);
             const defaultSeason = sorted.includes(yr) ? yr : sorted.reduce((c, s) => Math.abs(s - yr) < Math.abs(c - yr) ? s : c, sorted[0]);
             newSlots[pos][di] = { player: { canonical: p.canonical, positions: p.positions || [pos], seasons: sorted }, season: defaultSeason };
-            loadStats(p.canonical, defaultSeason);
+            // Stats lazy-load
           }
         }
       }
@@ -561,8 +698,8 @@ If can't be identified: {"found":false,"label":"${query}"}`,
 
   const handleAssign = useCallback((pos, di, player, season) => {
     setSlots(prev => { const col = [...prev[pos]]; col[di] = { player, season }; return { ...prev, [pos]: col }; });
-    loadStats(player.canonical, season);
-  }, [loadStats]);
+    // Stats lazy-load on Stats tab or Analyze
+  }, []);
 
   const handleRemove = useCallback((pos, di) => {
     setSlots(prev => { const col = [...prev[pos]]; col[di] = null; return { ...prev, [pos]: col }; });
@@ -571,10 +708,11 @@ If can't be identified: {"found":false,"label":"${query}"}`,
   const handleSeason = useCallback((pos, di, season) => {
     setSlots(prev => {
       const col = [...prev[pos]];
-      if (col[di]) { loadStats(col[di].player.canonical, season); col[di] = { ...col[di], season }; }
+      if (col[di]) { col[di] = { ...col[di], season }; }
       return { ...prev, [pos]: col };
     });
-  }, [loadStats]);
+    // Stats lazy-load
+  }, []);
 
   const handleRevert = useCallback((pos, di) => {
     const orig = originalSlots[pos]?.[di];
@@ -592,50 +730,65 @@ If can't be identified: {"found":false,"label":"${query}"}`,
     return orig.player.canonical !== curr.player.canonical;
   };
 
+  const loadAllCurrentStats = useCallback(() => {
+    POSITIONS.forEach(pos => {
+      [0, 1, 2].forEach(di => {
+        const slot = slots[pos][di];
+        if (slot) loadStats(slot.player.canonical, slot.season);
+      });
+    });
+  }, [slots, loadStats]);
+
   const totalPlayers = POSITIONS.reduce((a, p) => a + slots[p].filter(Boolean).length, 0);
   const starterCount = POSITIONS.filter(p => slots[p][0]).length;
   const canAnalyze = starterCount >= 3 && !analyzing;
   const swapCount = POSITIONS.reduce((a, p) => a + [0, 1, 2].filter(di => isSlotSwapped(p, di)).length, 0);
 
   const runAnalysis = async () => {
-    setAnalyzing(true); setAnalysisErr(null); setAnalysis(null); setTab('analysis');
+    setAnalyzing(true); setAnalysisErr(null); setAnalysis(null); setCompatibility(null); setTab('analysis');
+    loadAllCurrentStats();
+    await new Promise(r => setTimeout(r, 900));
     try {
-      const lines = POSITIONS.map(pos =>
-        [0, 1, 2].map(di => {
+      const starters = POSITIONS.map(pos => {
+        const s = slots[pos][0]; if (!s) return null;
+        const key = `${s.player.canonical}-${s.season}`;
+        const st = getAdjustedStats(statsCache[key], pos, 0);
+        return { pos, name: s.player.canonical, season: s.season, stats: st };
+      }).filter(Boolean);
+
+      const starterNames = starters.map(s => `${s.pos}: ${s.name} (${s.season}-${Number(s.season)+1})`).join(', ');
+
+      const allSlots = POSITIONS.flatMap(pos =>
+        [0,1,2].map(di => {
           const s = slots[pos][di]; if (!s) return null;
           const key = `${s.player.canonical}-${s.season}`;
-          const st = statsCache[key];
+          const st = getAdjustedStats(statsCache[key], pos, di);
           const swapped = isSlotSwapped(pos, di);
           const origName = originalSlots[pos]?.[di]?.player?.canonical;
-          return `  ${DEPTH_LABELS[di]} ${pos}: ${s.player.canonical} (${s.season}-${s.season + 1})${swapped ? ` [SWAPPED from ${origName}]` : ''}${st ? ` — ${st.ppg?.toFixed(1)} PPG / ${st.rpg?.toFixed(1)} RPG / ${st.apg?.toFixed(1)} APG` : ''}`;
-        }).filter(Boolean).join('\n')
-      ).filter(Boolean).join('\n');
+          const mpgNote = minutesOverride[`${pos}-${di}`] ? ` @ ${minutesOverride[`${pos}-${di}`]} MPG` : '';
+          const perNote = st?.per ? ` PER:${st.per.toFixed(1)}` : '';
+          return `  ${DEPTH_LABELS[di]} ${pos}: ${s.player.canonical} (${s.season}-${Number(s.season)+1})${swapped ? ` [SWAPPED from ${origName}]` : ''}${mpgNote}${st ? ` — ${st.ppg?.toFixed(1)} PPG / ${st.rpg?.toFixed(1)} RPG / ${st.apg?.toFixed(1)} APG${perNote}` : ''}`;
+        }).filter(Boolean)
+      ).join('\n');
 
-      const presetNote = currentPreset ? `Base team: ${currentPreset}.${swapCount > 0 ? ` ${swapCount} player(s) swapped.` : ' No changes.'}` : 'Custom roster.';
+      const presetNote = currentPreset ? `Base team: ${currentPreset}.${swapCount > 0 ? ` ${swapCount} swapped.` : ''}` : 'Custom roster.';
 
+      // Compatibility scores — Haiku (cheap)
+      const compatTxt = await callHaiku(
+        `NBA analytics expert. Score this starting lineup's chemistry. Return ONLY JSON, no markdown.\nStarters: ${starterNames}\n\nReturn: {"overall":<0-100>,"offensive_fit":{"score":<0-10>,"label":"<2-4 words>","note":"<one sharp sentence on usage overlap/ball dominance/role conflicts>"},"defensive_fit":{"score":<0-10>,"label":"<2-4 words>","note":"<one sentence on paint protection, perimeter D, defensive PER>"},"spacing":{"score":<0-10>,"label":"<2-4 words>","note":"<one sentence on 3PT shooting, floor spacing, drive lanes>"},"era_fit":{"score":<0-10>,"label":"<2-4 words>","note":"<one sentence on pace compatibility, era mismatches>"},"headline":"<one punchy sentence summarizing chemistry>"}\nBe brutally honest. Two post-dominant bigs or two ball-dominant guards score low.`,
+        500
+      );
+      try { setCompatibility(parseJSON(compatTxt)); } catch {}
+
+      // Deep analysis — Sonnet (quality matters)
       const txt = await callClaude(
-        `You are an elite NBA analyst. This is a what-if simulation. Evaluate this 15-man roster playing ${opponent || 'a full NBA season'}.
-${presetNote}
-
-${lines}
-
-Sharp expert breakdown:
-1. **Team Identity & Scheme** — offensive system, defensive approach, pace
-2. **Projected Team Stats Per Game** — pts, reb, ast, stl, blk, FG%, 3P%, pace
-3. **Starting Five** — cohesion, spacing, role fit
-4. **Bench Depth** — rotation quality, second unit
-5. **Key Strengths** (top 3)
-6. **Key Weaknesses** (top 3)
-${swapCount > 0 ? '7. **Impact of Swaps** — how do changes alter team identity and ceiling?\n8.' : '7.'} **Matchup** ${opponent ? `vs ${opponent}` : 'vs average contender'} — advantages/vulnerabilities
-${swapCount > 0 ? '9.' : '8.'} **Season Projection** — wins/82, playoff seed, championship odds, letter grade
-
-Note: Simulation for entertainment. Use real basketball strategy and historical context.`,
-        1400
+        `Elite NBA analyst. Deep what-if analysis for this roster playing ${opponent || 'a full NBA season'}.\n${presetNote}\n\nFULL ROSTER:\n${allSlots}\n\nFocus on:\n- How each starter's offensive AND defensive PER shapes their role together\n- Specific compatibility pairs: who elevates whom, who conflicts (e.g. Shaq + Magic both need post touches = conflict; Shaq + Curry = spacing paradise)\n- Usage rate conflicts between ball-dominant stars\n- How defensive assignments and rotations actually work\n\n1. **Starting Five Chemistry** — pair-by-pair compatibility, usage conflicts, who defers\n2. **Offensive System** — best scheme for this group, who runs it, what breaks down\n3. **Defensive Identity** — paint protection, perimeter coverage, weak links\n4. **Projected Stats Per Game** — pts, reb, ast, stl, blk, FG%, 3P%, pace\n5. **Bench & Rotations** — second unit, key subs\n6. **Key Strengths** (top 3, specific to this lineup)\n7. **Key Weaknesses** (top 3, specific)\n${swapCount > 0 ? '8. **Swap Impact** — how do changes alter chemistry?\n9.' : '8.'} **Matchup** ${opponent ? `vs ${opponent}` : 'vs average contender'}\n${swapCount > 0 ? '10.' : '9.'} **Projection** — wins/82, seed, title odds, letter grade\n\nBe direct. Cite real player tendencies and historical context.`,
+        1600
       );
       setAnalysis(txt);
-    } catch { setAnalysisErr('Analysis failed. Please try again.'); }
+    } catch (e) { console.error(e); setAnalysisErr('Analysis failed. Please try again.'); }
     setAnalyzing(false);
-  };
+  };;
 
   return (
     <div style={{ minHeight: '100vh', background: C.bg, color: C.text, fontFamily: "'Barlow', sans-serif" }}>
@@ -680,7 +833,7 @@ Note: Simulation for entertainment. Use real basketball strategy and historical 
       <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, padding: '0 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex' }}>
           {[['depth', 'DEPTH CHART'], ['stats', 'PLAYER STATS'], ['analysis', 'ANALYSIS']].map(([id, label]) => (
-            <button key={id} className="tab" onClick={() => setTab(id)}
+            <button key={id} className="tab" onClick={() => { setTab(id); if (id === 'stats') loadAllCurrentStats(); }}
               style={{ background: 'none', border: 'none', borderBottom: `2px solid ${tab === id ? C.accent : 'transparent'}`, color: tab === id ? C.text : C.muted, padding: '10px 14px', fontSize: 10, fontWeight: 800, letterSpacing: '1px', fontFamily: "'Barlow Condensed',sans-serif", cursor: 'pointer', transition: 'color 0.15s' }}>
               {label}
             </button>
@@ -766,6 +919,9 @@ Note: Simulation for entertainment. Use real basketball strategy and historical 
                             onAssign={handleAssign} onRemove={handleRemove}
                             onSeason={handleSeason} onRevert={handleRevert}
                             statsCache={statsCache} loadingKeys={loadingKeys}
+                            minutesOverride={minutesOverride[`${pos}-${di}`]}
+                            onSetMinutes={setMinutes}
+                            adjustedStats={getAdjustedStats(statsCache[slots[pos][di] ? `${slots[pos][di].player.canonical}-${slots[pos][di].season}` : ''], pos, di)}
                           />
                         ))}
                       </div>
@@ -796,7 +952,7 @@ Note: Simulation for entertainment. Use real basketball strategy and historical 
             <div style={{ animation: 'fadeIn 0.25s ease' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
                 <h2 style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: 16, fontWeight: 800 }}>Player Stats by Season</h2>
-                <span style={{ fontSize: 10, color: C.muted }}>· sourced via web search referencing Basketball Reference</span>
+                <span style={{ fontSize: 10, color: C.muted }}>· live BDL → BBRef web search → AI fallback · adjust minutes to scale stats</span>
               </div>
               {totalPlayers === 0 ? (
                 <div style={{ textAlign: 'center', padding: '60px 20px', color: C.muted }}>
@@ -810,8 +966,10 @@ Note: Simulation for entertainment. Use real basketball strategy and historical 
                     [0, 1, 2].map(di => {
                       const slot = slots[pos][di]; if (!slot) return null;
                       const key = `${slot.player.canonical}-${slot.season}`;
-                      const stats = statsCache[key];
+                      const rawStats = statsCache[key];
+                      const stats = getAdjustedStats(rawStats, pos, di);
                       const loading = loadingKeys.has(key);
+                      const mpgOverride = minutesOverride[`${pos}-${di}`];
                       const pc = POS_COLORS[pos];
                       const swapped = isSlotSwapped(pos, di);
                       const origName = originalSlots[pos]?.[di]?.player?.canonical;
@@ -822,7 +980,8 @@ Note: Simulation for entertainment. Use real basketball strategy and historical 
                             <span style={{ fontFamily: "'Barlow Condensed',sans-serif", fontWeight: 700, fontSize: 15, color: swapped ? C.swap : C.text }}>{slot.player.canonical}</span>
                             <span style={{ fontSize: 11, color: C.muted }}>{slot.season}–{slot.season + 1}</span>
                             {swapped && origName && <span style={{ fontSize: 9, color: C.muted, background: C.surface, borderRadius: 3, padding: '1px 6px', border: `1px solid ${C.border}` }}>↩ was {origName}</span>}
-                            {stats && <SourceBadge stats={stats} />}
+                            {rawStats && <SourceBadge stats={rawStats} />}
+                            {mpgOverride && <span style={{ fontSize: 9, color: C.warn, fontFamily: "'Barlow',sans-serif" }}>⏱ {mpgOverride} MPG</span>}
                             <span style={{ fontSize: 9, color: C.dim, marginLeft: 'auto' }}>{DEPTH_LABELS[di]}</span>
                           </div>
                           {loading ? (
@@ -830,16 +989,31 @@ Note: Simulation for entertainment. Use real basketball strategy and historical 
                               <Spinner size={11} color={pc.accent} /> Searching Basketball Reference…
                             </div>
                           ) : stats ? (
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 5 }}>
-                              <StatBadge label="PPG" value={stats.ppg} />
-                              <StatBadge label="RPG" value={stats.rpg} />
-                              <StatBadge label="APG" value={stats.apg} />
-                              <StatBadge label="SPG" value={stats.spg} />
-                              <StatBadge label="BPG" value={stats.bpg} />
-                              <StatBadge label="FG%" value={stats.fg_pct} pct />
-                              <StatBadge label="3P%" value={stats.three_pct} pct />
-                              <StatBadge label="PER" value={stats.per} />
-                            </div>
+                            <>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 5, marginBottom: 8 }}>
+                                <StatBadge label="PPG" value={stats.ppg} />
+                                <StatBadge label="RPG" value={stats.rpg} />
+                                <StatBadge label="APG" value={stats.apg} />
+                                <StatBadge label="SPG" value={stats.spg} />
+                                <StatBadge label="BPG" value={stats.bpg} />
+                                <StatBadge label="FG%" value={stats.fg_pct} pct />
+                                <StatBadge label="3P%" value={stats.three_pct} pct />
+                                <StatBadge label="PER" value={stats.per} />
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', background: C.surface, borderRadius: 6, border: `1px solid ${C.border}` }}>
+                                <span style={{ fontSize: 10, color: C.muted, fontFamily: "'Barlow',sans-serif", whiteSpace: 'nowrap' }}>Minutes per game:</span>
+                                <input type="range" min={10} max={48} step={1}
+                                  value={mpgOverride || Math.round(rawStats?.mpg || 28)}
+                                  onChange={e => setMinutes(pos, di, Number(e.target.value))}
+                                  style={{ flex: 1, accentColor: swapped ? C.swap : pc.accent, cursor: 'pointer' }}
+                                />
+                                <span style={{ fontSize: 12, fontWeight: 700, color: mpgOverride ? C.warn : C.text, fontFamily: "'Barlow Condensed',sans-serif", minWidth: 20 }}>
+                                  {mpgOverride || Math.round(rawStats?.mpg || 28)}
+                                </span>
+                                {mpgOverride && <button onClick={() => setMinutes(pos, di, undefined)} style={{ background: 'none', border: `1px solid ${C.dim}`, color: C.muted, borderRadius: 4, padding: '2px 7px', fontSize: 9, cursor: 'pointer', fontFamily: "'Barlow',sans-serif" }}>reset</button>}
+                                {stats._adjusted && <span style={{ fontSize: 9, color: C.warn, fontFamily: "'Barlow',sans-serif" }}>stats scaled to {mpgOverride} MPG</span>}
+                              </div>
+                            </>
                           ) : (
                             <div style={{ fontSize: 11, color: C.muted }}>Stats unavailable</div>
                           )}
@@ -859,7 +1033,7 @@ Note: Simulation for entertainment. Use real basketball strategy and historical 
                 <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: '48px 40px', textAlign: 'center' }}>
                   <div style={{ width: 38, height: 38, border: `3px solid ${C.dim}`, borderTopColor: C.accent, borderRadius: '50%', margin: '0 auto 18px', animation: 'spin 0.8s linear infinite' }} />
                   <div style={{ fontFamily: "'Barlow Condensed',sans-serif", fontSize: 17, fontWeight: 800, marginBottom: 7 }}>RUNNING DEEP ANALYSIS</div>
-                  <div style={{ fontSize: 12, color: C.muted }}>Evaluating lineup, projecting stats{swapCount > 0 ? `, comparing ${swapCount} swap${swapCount > 1 ? 's' : ''}` : ''}…</div>
+                  <div style={{ fontSize: 12, color: C.muted }}>Scoring chemistry · analyzing fit · projecting stats{swapCount > 0 ? ` · comparing ${swapCount} swap${swapCount > 1 ? 's' : ''}` : ''}…</div>
                 </div>
               )}
               {analysisErr && <div style={{ background: C.card, border: `1px solid ${C.danger}`, borderRadius: 10, padding: 18, color: '#f09595', fontSize: 13 }}>{analysisErr}</div>}
@@ -884,8 +1058,9 @@ Note: Simulation for entertainment. Use real basketball strategy and historical 
                     })}
                     {opponent && <span style={{ fontSize: 10, padding: '2px 8px', borderRadius: 4, background: '#221500', color: C.warn, border: `1px solid ${C.warn}33`, fontFamily: "'Barlow',sans-serif", fontWeight: 600 }}>vs {opponent}</span>}
                   </div>
+                  <CompatibilityCard compat={compatibility} />
                   <div style={{ background: '#0e0c08', border: `1px solid ${C.warn}22`, borderRadius: 6, padding: '8px 12px', marginBottom: 14, fontSize: 10, color: C.muted, fontFamily: "'Barlow',sans-serif", lineHeight: 1.5 }}>
-                    ⚠️ <strong style={{ color: C.estimateText }}>Simulation:</strong> AI-generated analysis for entertainment. Stats reference Basketball Reference where possible. Projections are speculative.
+                    ⚠️ <strong style={{ color: C.estimateText }}>Simulation:</strong> AI-generated analysis for entertainment. Current season stats from balldontlie.io; historical from BBRef/AI. Projections are speculative.
                   </div>
                   <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: '22px 26px', lineHeight: 1.78, fontSize: 13, fontFamily: "'Barlow',sans-serif", whiteSpace: 'pre-wrap', color: C.text, animation: 'fadeIn 0.4s ease' }}>
                     {analysis}
